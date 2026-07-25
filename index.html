@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Outback Monitor</title>
+<meta name="theme-color" content="#14161a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #16181d; --muted: #666e7a;
+    --line: #dfe3e8; --ok: #1f9d55; --warn: #d97706; --crit: #dc2626;
+    --accent: #2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --card: #1c1f25; --ink: #e8eaed; --muted: #9aa3ad;
+      --line: #2b2f37; --ok: #34d399; --warn: #fbbf24; --crit: #f87171;
+      --accent: #60a5fa;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+             max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  }
+  @media (max-width: 480px) {
+    body { font-size: 14px; }
+    .card { padding: 13px; border-radius: 10px; }
+    .volts { font-size: 38px; }
+    h1 { font-size: 16px; }
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+       color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  header { display: flex; justify-content: space-between; align-items: baseline;
+           gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  .card { background: var(--card); border: 1px solid var(--line);
+          border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .volts { font-size: 46px; font-weight: 650; line-height: 1; letter-spacing: -.02em; }
+  .volts small { font-size: 18px; font-weight: 500; color: var(--muted); }
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px;
+          font-size: 12px; font-weight: 600; }
+  .pill.ok { background: rgba(31,157,85,.15); color: var(--ok); }
+  .pill.warn { background: rgba(217,119,6,.15); color: var(--warn); }
+  .pill.crit { background: rgba(220,38,38,.15); color: var(--crit); }
+  .muted { color: var(--muted); font-size: 13px; }
+  .kv { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; }
+  .kv span:last-child { font-variant-numeric: tabular-nums; text-align: right; }
+  .alert { border-left: 4px solid var(--crit); padding: 10px 14px; margin-bottom: 8px;
+           background: rgba(220,38,38,.08); border-radius: 0 8px 8px 0; white-space: pre-line; }
+  .banner { border-left: 4px solid var(--warn); padding: 10px 14px; margin-bottom: 8px;
+            background: rgba(217,119,6,.08); border-radius: 0 8px 8px 0; }
+  pre.codes { white-space: pre-wrap; font: 13px/1.5 -apple-system, "Segoe UI", sans-serif;
+              color: var(--muted); margin: 0; }
+  footer { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 0 20px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Outback Monitor</h1>
+    <div class="muted" id="updated">loading&hellip;</div>
+  </header>
+  <div id="app"><p class="muted">Loading&hellip;</p></div>
+  <footer>Read-only snapshot from Airtable &middot; refreshes every 60 seconds in your
+    browser, the underlying data updates roughly every 5 minutes</footer>
+</div>
+
+<script>
+"use strict";
+
+// Read-only Airtable token, scoped to data.records:read on this one base only.
+// Visible to anyone who views this page's source - by design, this page has
+// no way to write data back, so that scope limits what it can be used for.
+var AIRTABLE_BASE = "appxd9t7CrSo71f5D";
+var AIRTABLE_TABLE = "Snapshots";
+var AIRTABLE_TOKEN = "patebCvz7qxJSW39B.e985aa091fc422c7d8b521dde6e89762ccb64375b1b12a6948c934a37e51346a";
+
+function esc(text) {
+  return String(text === null || text === undefined ? "" : text)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function fmtDuration(seconds) {
+  if (seconds === null || seconds === undefined) return "–";
+  seconds = Math.round(seconds);
+  var h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60);
+  if (h) return h + "h " + String(m).padStart(2, "0") + "m";
+  if (m) return m + "m " + String(seconds % 60).padStart(2, "0") + "s";
+  return seconds + "s";
+}
+
+function fmtStamp(iso) {
+  if (!iso) return "–";
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return esc(iso);
+  return d.toLocaleString(undefined, {
+    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit"
+  });
+}
+
+function statusClass(status) {
+  if (status === "critical") return "crit";
+  if (status === "warning" || status === "stale") return "warn";
+  if (status === "ok") return "ok";
+  return "warn";
+}
+
+function render(fields, fetchedAt) {
+  var cls = statusClass(fields["Battery Status"]);
+  var volts = fields["Battery Volts"];
+  var html = "";
+
+  if (fields["Battery Status"] === "stale") {
+    html += '<div class="card"><div class="banner"><strong>Reading is stale</strong>' +
+            '<div class="muted">WattPlot has not updated recently - see "read" time below.</div></div></div>';
+  }
+
+  if (fields["Active Alerts"] && fields["Active Alerts"] !== "none") {
+    html += '<div class="card"><h2>Active alerts</h2><div class="alert">' +
+            esc(fields["Active Alerts"]) + '</div></div>';
+  }
+
+  html += '<div class="card"><div class="grid">';
+  html += '<div><h2>Battery</h2><div class="volts" style="color:var(--' +
+          (cls === "ok" ? "ink" : cls) + ')">' +
+          (volts === undefined ? "–" : Number(volts).toFixed(1)) +
+          ' <small>V</small></div><div style="margin-top:8px">' +
+          '<span class="pill ' + cls + '">' + esc(fields["Battery Status"] || "unknown") +
+          '</span></div>' +
+          '<div class="muted" style="margin-top:8px">MATE ' + esc(fields["MATE Status"]) + '</div>' +
+          '<div class="muted">today ' +
+          (fields["Battery Min Today"] !== undefined ? Number(fields["Battery Min Today"]).toFixed(1) : "–") +
+          ' / ' +
+          (fields["Battery Max Today"] !== undefined ? Number(fields["Battery Max Today"]).toFixed(1) : "–") +
+          ' V</div></div>';
+
+  [["FX-1", "FX1"], ["FX-2", "FX2"]].forEach(function (pair) {
+    var name = pair[0], prefix = pair[1];
+    if (fields[prefix + " Status"] === undefined) return;
+    html += '<div><h2>' + name + '</h2>' +
+            '<div style="font-size:19px;font-weight:600">' + esc(fields[prefix + " Status"]) + '</div>' +
+            '<div class="kv"><span class="muted">AC in</span><span>' +
+            (fields[prefix + " AC In"] !== undefined ? Number(fields[prefix + " AC In"]).toFixed(0) + " V" : "–") +
+            '</span></div>' +
+            '<div class="kv"><span class="muted">AC out</span><span>' +
+            (fields[prefix + " AC Out"] !== undefined ? Number(fields[prefix + " AC Out"]).toFixed(0) + " V" : "–") +
+            '</span></div>' +
+            '<div class="kv"><span class="muted">Inverter / charge kWh</span><span>' +
+            (fields[prefix + " Inverter kWh"] !== undefined ? Number(fields[prefix + " Inverter kWh"]).toFixed(2) : "–") +
+            ' / ' +
+            (fields[prefix + " Charge kWh"] !== undefined ? Number(fields[prefix + " Charge kWh"]).toFixed(2) : "–") +
+            '</span></div></div>';
+  });
+  html += '</div></div>';
+
+  html += '<div class="card"><h2>Generator / grid</h2>' +
+          '<div class="kv"><span class="muted">Today</span><span>' +
+          fmtDuration(fields["Generator Today Seconds"]) + '</span></div>' +
+          '<div class="kv"><span class="muted">Last 7 days</span><span>' +
+          fmtDuration(fields["Generator Week Seconds"]) + '</span></div></div>';
+
+  if (fields["Recent Error Codes"] && fields["Recent Error Codes"] !== "none") {
+    html += '<div class="card"><h2>Error codes seen recently</h2>' +
+            '<pre class="codes">' + esc(fields["Recent Error Codes"]) + '</pre></div>';
+  }
+
+  html += '<div class="card"><h2>Reading age</h2>' +
+          '<div class="kv"><span class="muted">WattPlot last read</span><span>' +
+          fmtStamp(fields["Last Reading At"]) + '</span></div>' +
+          '<div class="kv"><span class="muted">Pushed to Airtable</span><span>' +
+          fmtStamp(fields["Timestamp"]) + '</span></div></div>';
+
+  document.getElementById("app").innerHTML = html;
+  document.getElementById("updated").textContent =
+    "Checked " + fetchedAt.toLocaleTimeString();
+}
+
+function renderError(message) {
+  document.getElementById("app").innerHTML =
+    '<div class="card"><div class="banner"><strong>Could not load the snapshot</strong>' +
+    '<div class="muted">' + esc(message) + '</div></div></div>';
+}
+
+function refresh() {
+  var url = "https://api.airtable.com/v0/" + AIRTABLE_BASE + "/" +
+            encodeURIComponent(AIRTABLE_TABLE) + "?maxRecords=1";
+  fetch(url, { headers: { "Authorization": "Bearer " + AIRTABLE_TOKEN } })
+    .then(function (r) {
+      if (!r.ok) throw new Error("Airtable returned HTTP " + r.status);
+      return r.json();
+    })
+    .then(function (body) {
+      var record = (body.records || [])[0];
+      if (!record) throw new Error("no rows in the Snapshots table yet");
+      render(record.fields || {}, new Date());
+    })
+    .catch(function (err) {
+      renderError(err.message || String(err));
+    });
+}
+
+refresh();
+setInterval(refresh, 60000);
+document.addEventListener("visibilitychange", function () {
+  if (!document.hidden) refresh();
+});
+</script>
+</body>
+</html>
