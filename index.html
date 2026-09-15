@@ -114,6 +114,20 @@ try {
   if (HOUR_OPTIONS.some(function (o) { return o.hours === saved; })) currentHours = saved;
 } catch (e) { /* private browsing etc - just use the default */ }
 
+var DAY_OPTIONS = [
+  {days: 3, label: "3 days"},
+  {days: 7, label: "7 days"},
+  {days: 30, label: "30 days"},
+  {days: 50, label: "50 days"},
+  {days: 100, label: "100 days"}
+];
+
+var currentDailyDays = 30;
+try {
+  var savedDays = Number(localStorage.getItem("outback_daily_days"));
+  if (DAY_OPTIONS.some(function (o) { return o.days === savedDays; })) currentDailyDays = savedDays;
+} catch (e) { /* private browsing etc - just use the default */ }
+
 function esc(text) {
   return String(text === null || text === undefined ? "" : text)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -509,6 +523,14 @@ function hourSelectHtml() {
   return '<select id="hourSelect">' + opts + '</select>';
 }
 
+function daySelectHtml() {
+  var opts = DAY_OPTIONS.map(function (o) {
+    return '<option value="' + o.days + '"' + (o.days === currentDailyDays ? ' selected' : '') +
+           '>' + o.label + '</option>';
+  }).join("");
+  return '<select id="daySelect">' + opts + '</select>';
+}
+
 function render(fields, history, daily, fetchedAt) {
   var cls = statusClass(fields["battery_status"]);
   var volts = fields["battery_volts"];
@@ -569,7 +591,8 @@ function render(fields, history, daily, fetchedAt) {
   html += '<div class="card"><h2>Power usage</h2>' + powerChart(powerSeries) + '</div>';
 
   if (daily && daily.length) {
-    html += '<div class="card"><h2>Power usage by day</h2>' + dailyPowerChart(daily) + '</div>';
+    html += '<div class="card"><div class="card-head"><h2>Power usage by day</h2>' + daySelectHtml() +
+            '</div>' + dailyPowerChart(daily) + '</div>';
   }
 
   html += '<div class="card"><h2>Generator / grid</h2>' +
@@ -605,6 +628,15 @@ function render(fields, history, daily, fetchedAt) {
       refresh();
     });
   }
+
+  var daySelect = document.getElementById("daySelect");
+  if (daySelect) {
+    daySelect.addEventListener("change", function () {
+      currentDailyDays = Number(daySelect.value) || 30;
+      try { localStorage.setItem("outback_daily_days", String(currentDailyDays)); } catch (e) {}
+      refresh();
+    });
+  }
 }
 
 function renderError(message) {
@@ -623,7 +655,8 @@ function refresh() {
     if (el) el.textContent = "Still loading… (first load can take a few seconds)";
   }, 1500);
 
-  var url = WEBAPP_URL + "?key=" + encodeURIComponent(VIEW_KEY) + "&hours=" + currentHours;
+  var url = WEBAPP_URL + "?key=" + encodeURIComponent(VIEW_KEY) + "&hours=" + currentHours +
+            "&daily_days=" + currentDailyDays;
   fetch(url)
     .then(function (r) {
       if (!r.ok) throw new Error("Google Sheets returned HTTP " + r.status);
