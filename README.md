@@ -11,9 +11,14 @@ source to anyone who looks, but unable to change anything. Because it talks
 to Google's servers rather than the shed PC, it works from anywhere, not just
 the home wifi.
 
-Unlike the local dashboard, this page has no 24-hour chart: the sheet side
-only keeps the single latest snapshot (to avoid growing without bound), so
-there's no history to draw a chart from. It refreshes every 60 seconds.
+It also draws the same battery-voltage and power-usage charts as the local
+dashboard, from a "History" sheet the Apps Script appends one row to on every
+live push (separate from "Live status", which is just the latest snapshot,
+overwritten in place). A dropdown picks the window (6h/12h/24h/3 days/7
+days) - longer than the local dashboard's fixed 24 hours, since this page
+isn't limited to WattPlot's local hourly files. There are no generator/grid
+shading bands on this chart, unlike the local one - that history doesn't
+leave the shed PC. It refreshes every 60 seconds.
 
 Published via GitHub Pages - see repository settings.
 
