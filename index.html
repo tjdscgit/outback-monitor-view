@@ -69,19 +69,19 @@
     <div class="muted" id="updated">loading&hellip;</div>
   </header>
   <div id="app"><p class="muted">Loading&hellip;</p></div>
-  <footer>Read-only snapshot from Airtable &middot; refreshes every 60 seconds in your
-    browser, the underlying data updates roughly every 5 minutes</footer>
+  <footer>Read-only snapshot from Google Sheets &middot; refreshes every 60 seconds in
+    your browser, the underlying data updates roughly every 60 seconds</footer>
 </div>
 
 <script>
 "use strict";
 
-// Read-only Airtable token, scoped to data.records:read on this one base only.
-// Visible to anyone who views this page's source - by design, this page has
-// no way to write data back, so that scope limits what it can be used for.
-var AIRTABLE_BASE = "appxd9t7CrSo71f5D";
-var AIRTABLE_TABLE = "Snapshots";
-var AIRTABLE_TOKEN = "patebCvz7qxJSW39B.e985aa091fc422c7d8b521dde6e89762ccb64375b1b12a6948c934a37e51346a";
+// Read-only Apps Script Web App, scoped to this one "key" reading the Live
+// status row only - it cannot write anything back. Visible to anyone who
+// views this page's source, same trust model as the old Airtable token this
+// replaced. Works from anywhere, not just the home wifi.
+var WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxF3Z1QVDq7tHW9taW3f62f9K4Q-uULhT3gLKEKrC9-h_ueMh8XPziVQbQXWpOUVWvwiw/exec";
+var VIEW_KEY = "IODz-9d7H8swIkoopuwprB0h-rG316yNLp2aeErsPtU";
 
 function esc(text) {
   return String(text === null || text === undefined ? "" : text)
@@ -89,7 +89,7 @@ function esc(text) {
 }
 
 function fmtDuration(seconds) {
-  if (seconds === null || seconds === undefined) return "–";
+  if (seconds === null || seconds === undefined || seconds === "") return "–";
   seconds = Math.round(seconds);
   var h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60);
   if (h) return h + "h " + String(m).padStart(2, "0") + "m";
@@ -114,69 +114,69 @@ function statusClass(status) {
 }
 
 function render(fields, fetchedAt) {
-  var cls = statusClass(fields["Battery Status"]);
-  var volts = fields["Battery Volts"];
+  var cls = statusClass(fields["battery_status"]);
+  var volts = fields["battery_volts"];
   var html = "";
 
-  if (fields["Battery Status"] === "stale") {
+  if (fields["battery_status"] === "stale") {
     html += '<div class="card"><div class="banner"><strong>Reading is stale</strong>' +
             '<div class="muted">WattPlot has not updated recently - see "read" time below.</div></div></div>';
   }
 
-  if (fields["Active Alerts"] && fields["Active Alerts"] !== "none") {
+  if (fields["active_alerts"] && fields["active_alerts"] !== "none") {
     html += '<div class="card"><h2>Active alerts</h2><div class="alert">' +
-            esc(fields["Active Alerts"]) + '</div></div>';
+            esc(fields["active_alerts"]) + '</div></div>';
   }
 
   html += '<div class="card"><div class="grid">';
   html += '<div><h2>Battery</h2><div class="volts" style="color:var(--' +
           (cls === "ok" ? "ink" : cls) + ')">' +
-          (volts === undefined ? "–" : Number(volts).toFixed(1)) +
+          (volts === undefined || volts === "" ? "–" : Number(volts).toFixed(1)) +
           ' <small>V</small></div><div style="margin-top:8px">' +
-          '<span class="pill ' + cls + '">' + esc(fields["Battery Status"] || "unknown") +
+          '<span class="pill ' + cls + '">' + esc(fields["battery_status"] || "unknown") +
           '</span></div>' +
-          '<div class="muted" style="margin-top:8px">MATE ' + esc(fields["MATE Status"]) + '</div>' +
+          '<div class="muted" style="margin-top:8px">MATE ' + esc(fields["mate_status"]) + '</div>' +
           '<div class="muted">today ' +
-          (fields["Battery Min Today"] !== undefined ? Number(fields["Battery Min Today"]).toFixed(1) : "–") +
+          (fields["battery_min_today"] !== undefined && fields["battery_min_today"] !== "" ? Number(fields["battery_min_today"]).toFixed(1) : "–") +
           ' / ' +
-          (fields["Battery Max Today"] !== undefined ? Number(fields["Battery Max Today"]).toFixed(1) : "–") +
+          (fields["battery_max_today"] !== undefined && fields["battery_max_today"] !== "" ? Number(fields["battery_max_today"]).toFixed(1) : "–") +
           ' V</div></div>';
 
-  [["FX-1", "FX1"], ["FX-2", "FX2"]].forEach(function (pair) {
+  [["FX-1", "fx1"], ["FX-2", "fx2"]].forEach(function (pair) {
     var name = pair[0], prefix = pair[1];
-    if (fields[prefix + " Status"] === undefined) return;
+    if (!fields[prefix + "_status"]) return;
     html += '<div><h2>' + name + '</h2>' +
-            '<div style="font-size:19px;font-weight:600">' + esc(fields[prefix + " Status"]) + '</div>' +
+            '<div style="font-size:19px;font-weight:600">' + esc(fields[prefix + "_status"]) + '</div>' +
             '<div class="kv"><span class="muted">AC in</span><span>' +
-            (fields[prefix + " AC In"] !== undefined ? Number(fields[prefix + " AC In"]).toFixed(0) + " V" : "–") +
+            (fields[prefix + "_ac_in"] !== undefined && fields[prefix + "_ac_in"] !== "" ? Number(fields[prefix + "_ac_in"]).toFixed(0) + " V" : "–") +
             '</span></div>' +
             '<div class="kv"><span class="muted">AC out</span><span>' +
-            (fields[prefix + " AC Out"] !== undefined ? Number(fields[prefix + " AC Out"]).toFixed(0) + " V" : "–") +
+            (fields[prefix + "_ac_out"] !== undefined && fields[prefix + "_ac_out"] !== "" ? Number(fields[prefix + "_ac_out"]).toFixed(0) + " V" : "–") +
             '</span></div>' +
             '<div class="kv"><span class="muted">Inverter / charge kWh</span><span>' +
-            (fields[prefix + " Inverter kWh"] !== undefined ? Number(fields[prefix + " Inverter kWh"]).toFixed(2) : "–") +
+            (fields[prefix + "_inverter_kwh"] !== undefined && fields[prefix + "_inverter_kwh"] !== "" ? Number(fields[prefix + "_inverter_kwh"]).toFixed(2) : "–") +
             ' / ' +
-            (fields[prefix + " Charge kWh"] !== undefined ? Number(fields[prefix + " Charge kWh"]).toFixed(2) : "–") +
+            (fields[prefix + "_charge_kwh"] !== undefined && fields[prefix + "_charge_kwh"] !== "" ? Number(fields[prefix + "_charge_kwh"]).toFixed(2) : "–") +
             '</span></div></div>';
   });
   html += '</div></div>';
 
   html += '<div class="card"><h2>Generator / grid</h2>' +
           '<div class="kv"><span class="muted">Today</span><span>' +
-          fmtDuration(fields["Generator Today Seconds"]) + '</span></div>' +
+          fmtDuration(fields["generator_today_seconds"]) + '</span></div>' +
           '<div class="kv"><span class="muted">Last 7 days</span><span>' +
-          fmtDuration(fields["Generator Week Seconds"]) + '</span></div></div>';
+          fmtDuration(fields["generator_week_seconds"]) + '</span></div></div>';
 
-  if (fields["Recent Error Codes"] && fields["Recent Error Codes"] !== "none") {
+  if (fields["recent_error_codes"] && fields["recent_error_codes"] !== "none") {
     html += '<div class="card"><h2>Error codes seen recently</h2>' +
-            '<pre class="codes">' + esc(fields["Recent Error Codes"]) + '</pre></div>';
+            '<pre class="codes">' + esc(fields["recent_error_codes"]) + '</pre></div>';
   }
 
   html += '<div class="card"><h2>Reading age</h2>' +
           '<div class="kv"><span class="muted">WattPlot last read</span><span>' +
-          fmtStamp(fields["Last Reading At"]) + '</span></div>' +
-          '<div class="kv"><span class="muted">Pushed to Airtable</span><span>' +
-          fmtStamp(fields["Timestamp"]) + '</span></div></div>';
+          fmtStamp(fields["last_reading_at"]) + '</span></div>' +
+          '<div class="kv"><span class="muted">Pushed to Google Sheets</span><span>' +
+          fmtStamp(fields["timestamp"]) + '</span></div></div>';
 
   document.getElementById("app").innerHTML = html;
   document.getElementById("updated").textContent =
@@ -190,17 +190,15 @@ function renderError(message) {
 }
 
 function refresh() {
-  var url = "https://api.airtable.com/v0/" + AIRTABLE_BASE + "/" +
-            encodeURIComponent(AIRTABLE_TABLE) + "?maxRecords=1";
-  fetch(url, { headers: { "Authorization": "Bearer " + AIRTABLE_TOKEN } })
+  var url = WEBAPP_URL + "?key=" + encodeURIComponent(VIEW_KEY);
+  fetch(url)
     .then(function (r) {
-      if (!r.ok) throw new Error("Airtable returned HTTP " + r.status);
+      if (!r.ok) throw new Error("Google Sheets returned HTTP " + r.status);
       return r.json();
     })
     .then(function (body) {
-      var record = (body.records || [])[0];
-      if (!record) throw new Error("no rows in the Snapshots table yet");
-      render(record.fields || {}, new Date());
+      if (!body.ok) throw new Error(body.error || "no live status yet");
+      render(body.fields || {}, new Date());
     })
     .catch(function (err) {
       renderError(err.message || String(err));
