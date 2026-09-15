@@ -404,6 +404,103 @@ function powerChart(series) {
          '<p class="muted">' + legend + ' &middot; kWh-so-today counters, resetting each local midnight.</p>';
 }
 
+// Stacked bars, one per completed day, from the "Power usage" sheet (one row
+// per midnight rollover) - charge below, inverter above, so bar height is
+// that day's total kWh. Same chart as the local dashboard's "Power usage by
+// day" card, ported almost verbatim.
+function dailyPowerChart(daily) {
+  if (!daily || daily.length < 2) return '<p class="muted">Not enough completed days yet - one bar appears each ' +
+      'midnight rollover.</p>';
+
+  var W = 800, H = 220, padL = 42, padR = 12, padT = 14, padB = 26;
+  var totals = daily.map(function (d) { return (d.charge_kwh || 0) + (d.inverter_kwh || 0); });
+  var hi = Math.max.apply(null, totals) * 1.15 || 1;
+
+  var n = daily.length;
+  var slot = (W - padL - padR) / n;
+  var barW = Math.min(48, slot * 0.62);
+
+  function Y(v) { return padT + (hi - v) / hi * (H - padT - padB); }
+
+  var parts = [];
+
+  var rawStep = hi / 4;
+  var mag = Math.pow(10, Math.floor(Math.log(rawStep) / Math.LN10));
+  var norm = rawStep / mag;
+  var step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+  for (var v = 0; v <= hi; v += step) {
+    var y = Y(v).toFixed(1);
+    parts.push('<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y +
+               '" stroke="var(--line)" stroke-width="1" opacity=".6"></line>');
+    parts.push('<text x="' + (padL - 6) + '" y="' + (parseFloat(y) + 3.5) +
+               '" text-anchor="end" font-size="10" fill="var(--muted)">' + v.toFixed(0) + '</text>');
+  }
+
+  var bars = [];
+  daily.forEach(function (d, i) {
+    var cx = padL + slot * (i + 0.5);
+    var x = (cx - barW / 2).toFixed(1);
+    var charge = d.charge_kwh || 0, inverter = d.inverter_kwh || 0;
+    var yCharge = Y(charge), yTotal = Y(charge + inverter), yZero = Y(0);
+    parts.push('<rect x="' + x + '" y="' + yCharge.toFixed(1) +
+               '" width="' + barW.toFixed(1) + '" height="' + (yZero - yCharge).toFixed(1) +
+               '" fill="var(--ok)"></rect>');
+    parts.push('<rect x="' + x + '" y="' + yTotal.toFixed(1) +
+               '" width="' + barW.toFixed(1) + '" height="' + (yCharge - yTotal).toFixed(1) +
+               '" fill="var(--accent)"></rect>');
+    if (n <= 14 || i % Math.ceil(n / 14) === 0) {
+      parts.push('<text x="' + cx.toFixed(1) + '" y="' + (H - 8) + '" text-anchor="middle" font-size="10" ' +
+                 'fill="var(--muted)">' + esc(d.date.slice(5)) + '</text>');
+    }
+    bars.push({cx: cx, date: d.date, charge: charge, inverter: inverter});
+  });
+
+  window.__dailyPowerChart = {bars: bars, padT: padT, H: H, W: W};
+
+  return '<div class="chart-wrap"><svg id="dailyPowerChart" viewBox="0 0 ' + W + ' ' + H +
+         '" role="img" aria-label="Power usage by day">' +
+         parts.join("") + '</svg><div id="dailyPowerTip" class="chart-tip"></div></div>' +
+         '<p class="muted"><span style="color:var(--ok)">&#9679;</span> charge&nbsp;&nbsp;' +
+         '<span style="color:var(--accent)">&#9679;</span> inverter &middot; last ' + daily.length +
+         ' completed days.</p>';
+}
+
+function bindDailyBarHover(svgId, tipId, chart) {
+  var svg = document.getElementById(svgId);
+  var tip = document.getElementById(tipId);
+  if (!svg || !tip || !chart || !chart.bars.length) return;
+
+  function show(clientX, clientY) {
+    var rect = svg.getBoundingClientRect();
+    var scale = chart.W / rect.width;
+    var x = (clientX - rect.left) * scale;
+    var nearest = chart.bars[0];
+    chart.bars.forEach(function (b) {
+      if (Math.abs(b.cx - x) < Math.abs(nearest.cx - x)) nearest = b;
+    });
+    tip.innerHTML = '<div class="tip-time">' + esc(nearest.date) + '</div>' +
+      '<div><span style="color:var(--ok)">&#9679;</span> charge: ' + nearest.charge.toFixed(2) + ' kWh</div>' +
+      '<div><span style="color:var(--accent)">&#9679;</span> inverter: ' + nearest.inverter.toFixed(2) + ' kWh</div>';
+    var left = clientX - rect.left + 14;
+    if (left + 150 > rect.width) left = clientX - rect.left - 150;
+    tip.style.left = Math.max(0, left) + "px";
+    tip.style.top = Math.max(0, clientY - rect.top - 12) + "px";
+    tip.style.display = "block";
+  }
+  function hide() { tip.style.display = "none"; }
+
+  svg.addEventListener("mousemove", function (e) { show(e.clientX, e.clientY); });
+  svg.addEventListener("mouseleave", hide);
+  svg.addEventListener("touchstart", function (e) {
+    show(e.touches[0].clientX, e.touches[0].clientY);
+  }, {passive: true});
+  svg.addEventListener("touchmove", function (e) {
+    show(e.touches[0].clientX, e.touches[0].clientY);
+    e.preventDefault();
+  }, {passive: false});
+  svg.addEventListener("touchend", hide);
+}
+
 function hourSelectHtml() {
   var opts = HOUR_OPTIONS.map(function (o) {
     return '<option value="' + o.hours + '"' + (o.hours === currentHours ? ' selected' : '') +
@@ -412,7 +509,7 @@ function hourSelectHtml() {
   return '<select id="hourSelect">' + opts + '</select>';
 }
 
-function render(fields, history, fetchedAt) {
+function render(fields, history, daily, fetchedAt) {
   var cls = statusClass(fields["battery_status"]);
   var volts = fields["battery_volts"];
   var html = "";
@@ -471,6 +568,10 @@ function render(fields, history, fetchedAt) {
 
   html += '<div class="card"><h2>Power usage</h2>' + powerChart(powerSeries) + '</div>';
 
+  if (daily && daily.length) {
+    html += '<div class="card"><h2>Power usage by day</h2>' + dailyPowerChart(daily) + '</div>';
+  }
+
   html += '<div class="card"><h2>Generator / grid</h2>' +
           '<div class="kv"><span class="muted">Today</span><span>' +
           fmtDuration(fields["generator_today_seconds"]) + '</span></div>' +
@@ -494,6 +595,7 @@ function render(fields, history, fetchedAt) {
 
   bindChartHover("voltChart", "voltTip", window.__voltChart);
   bindChartHover("powerChart", "powerTip", window.__powerChart);
+  bindDailyBarHover("dailyPowerChart", "dailyPowerTip", window.__dailyPowerChart);
 
   var select = document.getElementById("hourSelect");
   if (select) {
@@ -529,7 +631,7 @@ function refresh() {
     })
     .then(function (body) {
       if (!body.ok) throw new Error(body.error || "no live status yet");
-      render(body.fields || {}, body.history || [], new Date());
+      render(body.fields || {}, body.history || [], body.daily || [], new Date());
     })
     .catch(function (err) {
       renderError(err.message || String(err));
