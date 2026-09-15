@@ -41,6 +41,9 @@
            gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
   .card { background: var(--card); border: 1px solid var(--line);
           border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  .card-head { display: flex; justify-content: space-between; align-items: center;
+               gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .card-head h2 { margin: 0; }
   .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
   .volts { font-size: 46px; font-weight: 650; line-height: 1; letter-spacing: -.02em; }
   .volts small { font-size: 18px; font-weight: 500; color: var(--muted); }
@@ -60,6 +63,17 @@
               color: var(--muted); margin: 0; }
   footer { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 0 20px; }
   a { color: var(--accent); }
+  select { background: var(--card); color: var(--ink); border: 1px solid var(--line);
+           border-radius: 6px; padding: 5px 8px; font-size: 13px; }
+  svg { width: 100%; height: auto; display: block; }
+  .chart-wrap { position: relative; }
+  .chart-wrap svg { cursor: crosshair; touch-action: pan-y; }
+  .chart-tip { position: absolute; pointer-events: none; background: var(--card);
+               border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px;
+               font-size: 12px; line-height: 1.5; box-shadow: 0 2px 8px rgba(0,0,0,.18);
+               white-space: nowrap; z-index: 5; display: none; }
+  .chart-tip .tip-time { font-weight: 600; color: var(--muted); font-size: 11px;
+                          margin-bottom: 2px; }
 </style>
 </head>
 <body>
@@ -77,11 +91,28 @@
 "use strict";
 
 // Read-only Apps Script Web App, scoped to this one "key" reading the Live
-// status row only - it cannot write anything back. Visible to anyone who
-// views this page's source, same trust model as the old Airtable token this
-// replaced. Works from anywhere, not just the home wifi.
+// status row and History sheet - it cannot write anything back. Visible to
+// anyone who views this page's source, same trust model as the old Airtable
+// token this replaced. Works from anywhere, not just the home wifi.
 var WEBAPP_URL = "https://script.google.com/macros/s/AKfycbxF3Z1QVDq7tHW9taW3f62f9K4Q-uULhT3gLKEKrC9-h_ueMh8XPziVQbQXWpOUVWvwiw/exec";
 var VIEW_KEY = "IODz-9d7H8swIkoopuwprB0h-rG316yNLp2aeErsPtU";
+
+// Matches config.json's voltage thresholds - update both if either changes.
+var THRESHOLDS = {warning: 48.8, critical: 48.0, float: 55.2};
+
+var HOUR_OPTIONS = [
+  {hours: 6, label: "6 hours"},
+  {hours: 12, label: "12 hours"},
+  {hours: 24, label: "24 hours"},
+  {hours: 72, label: "3 days"},
+  {hours: 168, label: "7 days"}
+];
+
+var currentHours = 24;
+try {
+  var saved = Number(localStorage.getItem("outback_chart_hours"));
+  if (HOUR_OPTIONS.some(function (o) { return o.hours === saved; })) currentHours = saved;
+} catch (e) { /* private browsing etc - just use the default */ }
 
 function esc(text) {
   return String(text === null || text === undefined ? "" : text)
@@ -106,6 +137,14 @@ function fmtStamp(iso) {
   });
 }
 
+function fmtStampSec(iso) {
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return esc(iso);
+  return d.toLocaleString(undefined, {
+    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"
+  });
+}
+
 function statusClass(status) {
   if (status === "critical") return "crit";
   if (status === "warning" || status === "stale") return "warn";
@@ -113,7 +152,267 @@ function statusClass(status) {
   return "warn";
 }
 
-function render(fields, fetchedAt) {
+// Wires hover/tap-for-detail onto a chart built by battChart() or
+// powerChart(): a vertical guide line, one dot per plotted field, and a
+// tooltip showing the timestamp and each field's value at the nearest
+// sampled point. Ported from the local dashboard's identical helper.
+function bindChartHover(svgId, tipId, chart) {
+  var svg = document.getElementById(svgId);
+  var tip = document.getElementById(tipId);
+  if (!svg || !tip || !chart || chart.series.length < 2) return;
+
+  var series = chart.series, t0 = chart.t0, t1 = chart.t1;
+  var padL = chart.padL, padR = chart.padR, padT = chart.padT, padB = chart.padB;
+  var W = chart.W, H = chart.H, Y = chart.Y;
+  var ns = "http://www.w3.org/2000/svg";
+
+  var guide = document.createElementNS(ns, "line");
+  guide.setAttribute("y1", padT); guide.setAttribute("y2", H - padB);
+  guide.setAttribute("stroke", "var(--muted)"); guide.setAttribute("stroke-width", "1");
+  guide.setAttribute("stroke-dasharray", "3 3"); guide.style.display = "none";
+  svg.appendChild(guide);
+
+  var dots = chart.fields.map(function (f) {
+    var c = document.createElementNS(ns, "circle");
+    c.setAttribute("r", "4"); c.setAttribute("fill", f.color);
+    c.setAttribute("stroke", "var(--card)"); c.setAttribute("stroke-width", "1.5");
+    c.style.display = "none";
+    svg.appendChild(c);
+    return c;
+  });
+
+  function X(ms) { return padL + (ms - t0) / (t1 - t0) * (W - padL - padR); }
+
+  function nearest(ms) {
+    var lo = 0, hi = series.length - 1;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (Date.parse(series[mid][0]) < ms) lo = mid + 1; else hi = mid;
+    }
+    if (lo > 0 && Math.abs(Date.parse(series[lo - 1][0]) - ms) < Math.abs(Date.parse(series[lo][0]) - ms)) {
+      lo -= 1;
+    }
+    return series[lo];
+  }
+
+  function show(clientX, clientY) {
+    var rect = svg.getBoundingClientRect();
+    var frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    var ms = t0 + (frac * W - padL) / (W - padL - padR) * (t1 - t0);
+    var point = nearest(ms);
+    if (!point) return;
+
+    var px = X(Date.parse(point[0]));
+    guide.setAttribute("x1", px); guide.setAttribute("x2", px); guide.style.display = "";
+
+    var html = '<div class="tip-time">' + fmtStampSec(point[0]) + '</div>';
+    chart.fields.forEach(function (f, i) {
+      var v = point[f.index];
+      dots[i].setAttribute("cx", px);
+      dots[i].setAttribute("cy", Y(v === null || v === undefined ? 0 : v));
+      dots[i].style.display = "";
+      html += '<div><span style="color:' + f.color + '">&#9679;</span> ' + esc(f.label) + ': ' +
+              (v === null || v === undefined ? "–" : v.toFixed(f.decimals)) + (f.unit || "") + '</div>';
+    });
+    tip.innerHTML = html;
+
+    var left = clientX - rect.left + 14;
+    if (left + 150 > rect.width) left = clientX - rect.left - 150;
+    tip.style.left = Math.max(0, left) + "px";
+    tip.style.top = Math.max(0, clientY - rect.top - 12) + "px";
+    tip.style.display = "block";
+  }
+
+  function hide() {
+    guide.style.display = "none";
+    dots.forEach(function (d) { d.style.display = "none"; });
+    tip.style.display = "none";
+  }
+
+  svg.addEventListener("mousemove", function (e) { show(e.clientX, e.clientY); });
+  svg.addEventListener("mouseleave", hide);
+  svg.addEventListener("touchstart", function (e) {
+    show(e.touches[0].clientX, e.touches[0].clientY);
+  }, {passive: true});
+  svg.addEventListener("touchmove", function (e) {
+    show(e.touches[0].clientX, e.touches[0].clientY);
+    e.preventDefault();
+  }, {passive: false});
+  svg.addEventListener("touchend", hide);
+}
+
+// Battery voltage over the selected window. series is [[iso, volts], ...].
+// No generator/grid shading here (unlike the local dashboard) - that history
+// doesn't leave the shed PC, only battery volts and kWh counters do.
+function battChart(series) {
+  if (series.length < 2) return '<p class="muted">Not enough history yet - the chart fills in as the sheet gets more readings.</p>';
+
+  var W = 800, H = 260, padL = 42, padR = 12, padT = 14, padB = 26;
+  var t0 = Date.parse(series[0][0]), t1 = Date.parse(series[series.length - 1][0]);
+  if (t1 <= t0) t1 = t0 + 1;
+
+  var values = series.map(function (p) { return p[1]; });
+  var lo = Math.min.apply(null, values), hi = Math.max.apply(null, values);
+  lo = Math.min(lo, THRESHOLDS.warning) - 0.4;
+  hi = Math.max(hi, THRESHOLDS.float) + 0.4;
+  if (hi - lo < 2) { hi = lo + 2; }
+
+  function X(ms) { return padL + (ms - t0) / (t1 - t0) * (W - padL - padR); }
+  function Y(v) { return padT + (hi - v) / (hi - lo) * (H - padT - padB); }
+
+  var parts = [];
+
+  [["critical", THRESHOLDS.critical, "var(--crit)"],
+   ["warning", THRESHOLDS.warning, "var(--warn)"],
+   ["float " + THRESHOLDS.float.toFixed(1), THRESHOLDS.float, "var(--ok)"]
+  ].forEach(function (row) {
+    if (row[1] < lo || row[1] > hi) return;
+    var y = Y(row[1]).toFixed(1);
+    parts.push('<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y +
+               '" stroke="' + row[2] + '" stroke-width="1" stroke-dasharray="4 4" opacity=".75"></line>');
+    parts.push('<text x="' + (W - padR) + '" y="' + (y - 4) + '" text-anchor="end" font-size="10" fill="' +
+               row[2] + '">' + esc(row[0]) + '</text>');
+  });
+
+  for (var v = Math.ceil(lo); v <= hi; v++) {
+    var y = Y(v).toFixed(1);
+    parts.push('<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y +
+               '" stroke="var(--line)" stroke-width="1" opacity=".6"></line>');
+    parts.push('<text x="' + (padL - 6) + '" y="' + (parseFloat(y) + 3.5) +
+               '" text-anchor="end" font-size="10" fill="var(--muted)">' + v + '</text>');
+  }
+
+  var spanHours = (t1 - t0) / 3600000;
+  var tickStepHours = spanHours > 96 ? 24 : spanHours > 30 ? 6 : 3;
+  var tick = new Date(t0);
+  tick.setMinutes(0, 0, 0);
+  tick.setHours(tick.getHours() + (tickStepHours - tick.getHours() % tickStepHours));
+  for (; tick.getTime() < t1; tick.setHours(tick.getHours() + tickStepHours)) {
+    var x = X(tick.getTime()).toFixed(1);
+    var label = tickStepHours === 24
+      ? (tick.getMonth() + 1) + "/" + tick.getDate()
+      : String(tick.getHours()).padStart(2, "0") + ":00";
+    parts.push('<text x="' + x + '" y="' + (H - 8) + '" text-anchor="middle" font-size="10" fill="var(--muted)">' +
+               label + '</text>');
+  }
+
+  var d = series.map(function (p, i) {
+    return (i ? "L" : "M") + X(Date.parse(p[0])).toFixed(1) + " " + Y(p[1]).toFixed(1);
+  }).join(" ");
+  parts.push('<path d="' + d + '" fill="none" stroke="var(--accent)" stroke-width="2" ' +
+             'stroke-linejoin="round" stroke-linecap="round"></path>');
+
+  var last = series[series.length - 1];
+  parts.push('<circle cx="' + X(Date.parse(last[0])).toFixed(1) + '" cy="' + Y(last[1]).toFixed(1) +
+             '" r="3.5" fill="var(--accent)"></circle>');
+
+  window.__voltChart = {series: series, t0: t0, t1: t1, padL: padL, padR: padR,
+                        padT: padT, padB: padB, W: W, H: H, Y: Y,
+                        fields: [{index: 1, label: "battery", color: "var(--accent)",
+                                 decimals: 1, unit: " V"}]};
+
+  return '<div class="chart-wrap"><svg id="voltChart" viewBox="0 0 ' + W + ' ' + H +
+         '" role="img" aria-label="Battery voltage over time">' +
+         parts.join("") + '</svg><div id="voltTip" class="chart-tip"></div></div>' +
+         '<p class="muted">' + values.length + ' samples (low ' + Math.min.apply(null, values).toFixed(1) +
+         ' V, high ' + Math.max.apply(null, values).toFixed(1) + ' V).</p>';
+}
+
+// Power usage (kWh-so-today counters, summed across both FX units) over the
+// selected window. series is [[iso, charge_kwh, inverter_kwh], ...]. These
+// reset to ~0 at local midnight, so a window spanning more than a day shows
+// a sawtooth - one climb per day - rather than a single running total.
+function powerChart(series) {
+  if (series.length < 2) return '<p class="muted">Not enough history yet - the chart fills in as the sheet gets more readings.</p>';
+
+  var W = 800, H = 220, padL = 42, padR = 12, padT = 14, padB = 26;
+  var t0 = Date.parse(series[0][0]), t1 = Date.parse(series[series.length - 1][0]);
+  if (t1 <= t0) t1 = t0 + 1;
+
+  var lines = [["charge", 1, "var(--ok)"], ["inverter", 2, "var(--accent)"]];
+  var movingValues = [];
+  lines.forEach(function (l) {
+    var vals = series.map(function (p) { return p[l[1]]; });
+    var lMin = Math.min.apply(null, vals), lMax = Math.max.apply(null, vals);
+    if (lMax - lMin > 0.001) movingValues = movingValues.concat(vals);
+  });
+  var allValues = series.map(function (p) { return lines.map(function (l) { return p[l[1]]; }); })
+                        .reduce(function (a, b) { return a.concat(b); }, []);
+  var scaleValues = movingValues.length ? movingValues : allValues;
+  var lo = Math.min.apply(null, scaleValues);
+  var hi = Math.max.apply(null, scaleValues);
+  var pad = Math.max((hi - lo) * 0.15, 0.05);
+  lo -= pad;
+  hi += pad;
+
+  function X(ms) { return padL + (ms - t0) / (t1 - t0) * (W - padL - padR); }
+  function Y(v) {
+    var y = padT + (hi - v) / (hi - lo) * (H - padT - padB);
+    return Math.max(padT, Math.min(H - padB, y));
+  }
+
+  var parts = [];
+
+  var rawStep = (hi - lo) / 4;
+  var mag = Math.pow(10, Math.floor(Math.log(rawStep) / Math.LN10));
+  var norm = rawStep / mag;
+  var step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+  var decimals = Math.max(0, -Math.floor(Math.log(step) / Math.LN10 + 1e-9));
+  for (var v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    var y = Y(v).toFixed(1);
+    parts.push('<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y +
+               '" stroke="var(--line)" stroke-width="1" opacity=".6"></line>');
+    parts.push('<text x="' + (padL - 6) + '" y="' + (parseFloat(y) + 3.5) +
+               '" text-anchor="end" font-size="10" fill="var(--muted)">' + v.toFixed(decimals) + '</text>');
+  }
+
+  var spanHours = (t1 - t0) / 3600000;
+  var tickStepHours = spanHours > 96 ? 24 : spanHours > 30 ? 6 : 3;
+  var tick = new Date(t0);
+  tick.setMinutes(0, 0, 0);
+  tick.setHours(tick.getHours() + (tickStepHours - tick.getHours() % tickStepHours));
+  for (; tick.getTime() < t1; tick.setHours(tick.getHours() + tickStepHours)) {
+    var x = X(tick.getTime()).toFixed(1);
+    var label = tickStepHours === 24
+      ? (tick.getMonth() + 1) + "/" + tick.getDate()
+      : String(tick.getHours()).padStart(2, "0") + ":00";
+    parts.push('<text x="' + x + '" y="' + (H - 8) + '" text-anchor="middle" font-size="10" fill="var(--muted)">' +
+               label + '</text>');
+  }
+
+  lines.forEach(function (l) {
+    var d = series.map(function (p, i) {
+      return (i ? "L" : "M") + X(Date.parse(p[0])).toFixed(1) + " " + Y(p[l[1]]).toFixed(1);
+    }).join(" ");
+    parts.push('<path d="' + d + '" fill="none" stroke="' + l[2] + '" stroke-width="2" ' +
+               'stroke-linejoin="round" stroke-linecap="round"></path>');
+  });
+
+  var legend = lines.map(function (l) {
+    return '<span style="color:' + l[2] + '">&#9679;</span> ' + l[0];
+  }).join('&nbsp;&nbsp;');
+
+  window.__powerChart = {series: series, t0: t0, t1: t1, padL: padL, padR: padR,
+                         padT: padT, padB: padB, W: W, H: H, Y: Y,
+                         fields: lines.map(function (l) {
+                           return {index: l[1], label: l[0], color: l[2], decimals: 3, unit: " kWh"};
+                         })};
+
+  return '<div class="chart-wrap"><svg id="powerChart" viewBox="0 0 ' + W + ' ' + H +
+         '" role="img" aria-label="Power usage over time">' +
+         parts.join("") + '</svg><div id="powerTip" class="chart-tip"></div></div>' +
+         '<p class="muted">' + legend + ' &middot; kWh-so-today counters, resetting each local midnight.</p>';
+}
+
+function hourSelectHtml() {
+  var opts = HOUR_OPTIONS.map(function (o) {
+    return '<option value="' + o.hours + '"' + (o.hours === currentHours ? ' selected' : '') +
+           '>' + o.label + '</option>';
+  }).join("");
+  return '<select id="hourSelect">' + opts + '</select>';
+}
+
+function render(fields, history, fetchedAt) {
   var cls = statusClass(fields["battery_status"]);
   var volts = fields["battery_volts"];
   var html = "";
@@ -161,6 +460,17 @@ function render(fields, fetchedAt) {
   });
   html += '</div></div>';
 
+  var voltSeries = history.map(function (r) { return [r[0], Number(r[1])]; })
+                          .filter(function (p) { return !isNaN(p[1]); });
+  var powerSeries = history.map(function (r) {
+    return [r[0], (Number(r[2]) || 0) + (Number(r[4]) || 0), (Number(r[3]) || 0) + (Number(r[5]) || 0)];
+  });
+
+  html += '<div class="card"><div class="card-head"><h2>Battery voltage</h2>' + hourSelectHtml() + '</div>' +
+          battChart(voltSeries) + '</div>';
+
+  html += '<div class="card"><h2>Power usage</h2>' + powerChart(powerSeries) + '</div>';
+
   html += '<div class="card"><h2>Generator / grid</h2>' +
           '<div class="kv"><span class="muted">Today</span><span>' +
           fmtDuration(fields["generator_today_seconds"]) + '</span></div>' +
@@ -181,6 +491,18 @@ function render(fields, fetchedAt) {
   document.getElementById("app").innerHTML = html;
   document.getElementById("updated").textContent =
     "Checked " + fetchedAt.toLocaleTimeString();
+
+  bindChartHover("voltChart", "voltTip", window.__voltChart);
+  bindChartHover("powerChart", "powerTip", window.__powerChart);
+
+  var select = document.getElementById("hourSelect");
+  if (select) {
+    select.addEventListener("change", function () {
+      currentHours = Number(select.value) || 24;
+      try { localStorage.setItem("outback_chart_hours", String(currentHours)); } catch (e) {}
+      refresh();
+    });
+  }
 }
 
 function renderError(message) {
@@ -190,7 +512,7 @@ function renderError(message) {
 }
 
 function refresh() {
-  var url = WEBAPP_URL + "?key=" + encodeURIComponent(VIEW_KEY);
+  var url = WEBAPP_URL + "?key=" + encodeURIComponent(VIEW_KEY) + "&hours=" + currentHours;
   fetch(url)
     .then(function (r) {
       if (!r.ok) throw new Error("Google Sheets returned HTTP " + r.status);
@@ -198,7 +520,7 @@ function refresh() {
     })
     .then(function (body) {
       if (!body.ok) throw new Error(body.error || "no live status yet");
-      render(body.fields || {}, new Date());
+      render(body.fields || {}, body.history || [], new Date());
     })
     .catch(function (err) {
       renderError(err.message || String(err));
