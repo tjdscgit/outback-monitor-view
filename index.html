@@ -512,6 +512,15 @@ function renderError(message) {
 }
 
 function refresh() {
+  // The Apps Script Web App this hits typically answers in 2-4 seconds, and
+  // sometimes 10+ after it's been idle a while (a Google-side cold start,
+  // not something this page can avoid) - so on first load, say so rather
+  // than leaving a bare "Loading..." with no sign anything is happening.
+  var slowNotice = setTimeout(function () {
+    var el = document.getElementById("updated");
+    if (el) el.textContent = "Still loading… (first load can take a few seconds)";
+  }, 1500);
+
   var url = WEBAPP_URL + "?key=" + encodeURIComponent(VIEW_KEY) + "&hours=" + currentHours;
   fetch(url)
     .then(function (r) {
@@ -524,6 +533,9 @@ function refresh() {
     })
     .catch(function (err) {
       renderError(err.message || String(err));
+    })
+    .then(function () {
+      clearTimeout(slowNotice);
     });
 }
 
